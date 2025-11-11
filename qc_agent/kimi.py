@@ -4,13 +4,12 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Dict, List, Sequence
+from typing import Any, Dict, List, Sequence, Optional
 import json
 import logging
 import time
 
 import requests
-
 
 logger = logging.getLogger(__name__)
 
@@ -28,7 +27,15 @@ class KimiClientError(RuntimeError):
 class KimiClient:
     """Blocking client for the Kimi chat completions endpoint with retries."""
 
-    def __init__(self, api_key: str, base_url: str, model: str, retry: int = 3, timeout: int = 120, log_path: Path | None = None) -> None:
+    def __init__(
+        self,
+        api_key: str,
+        base_url: str,
+        model: str,
+        retry: int = 3,
+        timeout: int = 120,
+        log_path: Optional[Path] = None,
+    ) -> None:
         if not api_key:
             raise ValueError("KIMI_API_KEY is missing; please set the environment variable.")
         self.api_key = api_key
@@ -46,6 +53,7 @@ class KimiClient:
         messages: Sequence[ChatMessage],
         temperature: float = 0.2,
         max_output_tokens: int = 1200,
+        stream: bool = False,
     ) -> Dict[str, Any]:
         url = f"{self.base_url}/chat/completions"
         payload = {
@@ -53,7 +61,7 @@ class KimiClient:
             "messages": [{"role": m.role, "content": m.content} for m in messages],
             "temperature": temperature,
             "max_tokens": max_output_tokens,
-            "stream": False,
+            "stream": stream,
         }
         headers = {
             "Authorization": f"Bearer {self.api_key}",
@@ -68,28 +76,73 @@ class KimiClient:
                 "attempt": attempt + 1,
                 "temperature": temperature,
                 "max_tokens": max_output_tokens,
+                "stream": stream,
                 "messages": serialized_messages,
             }
             try:
-                resp = self.session.post(url, headers=headers, json=payload, timeout=self.timeout)
+                resp = self.session.post(
+                    url,
+                    headers=headers,
+                    json=payload,
+                    timeout=self.timeout,
+                    stream=stream,
+                )
                 if resp.status_code >= 300:
                     logger.warning("Kimi API error %s: %s", resp.status_code, resp.text[:2000])
                     raise KimiClientError(f"Kimi API failed: {resp.status_code}")
-                data = resp.json()
-                text = self._extract_text(data)
+                if stream:
+                    text, data = self._consume_stream(resp)
+                else:
+                    data = resp.json()
+                    text = self._extract_text(data)
                 if text and text.strip():
                     self._log_entry({**log_meta, "status": "success", "response": _truncate_json(data)})
                     return {"text": text.strip(), "raw": data}
                 logger.warning("Kimi empty content, raw=%s", _truncate_json(data))
                 self._log_entry({**log_meta, "status": "empty", "response": _truncate_json(data)})
                 raise KimiClientError("Kimi API returned empty content")
-            except (requests.Timeout, requests.ConnectionError, KimiClientError, ValueError) as exc:
+            except (requests.Timeout, requests.ConnectionError, KimiClientError, ValueError, json.JSONDecodeError) as exc:
                 last_error = exc
                 backoff = 2 ** attempt
                 logger.warning("Kimi request failed (attempt %s/%s): %s", attempt + 1, self.retry, exc)
                 self._log_entry({**log_meta, "status": "error", "error": str(exc)})
                 time.sleep(backoff)
         raise KimiClientError(f"Kimi chat failed after {self.retry} attempts: {last_error}")
+
+    def _consume_stream(self, resp: requests.Response) -> tuple[str, Dict[str, Any]]:
+        text_parts: List[str] = []
+        raw_chunks: List[Dict[str, Any]] = []
+        usage: Dict[str, Any] | None = None
+        try:
+            for line_bytes in resp.iter_lines():
+                if not line_bytes:
+                    continue
+                line = line_bytes.decode('utf-8')
+                line = line.strip()
+                if not line.startswith("data:"):
+                    continue
+                payload = line[5:].strip()
+                if payload == "[DONE]":
+                    break
+                try:
+                    chunk = json.loads(payload)
+                except json.JSONDecodeError:
+                    continue
+                raw_chunks.append(chunk)
+                choices = chunk.get("choices") or []
+                if choices:
+                    delta = choices[0].get("delta", {})
+                    content = delta.get("content")
+                    if content:
+                        text_parts.append(content)
+                    if not usage:
+                        usage = choices[0].get("usage")
+        finally:
+            resp.close()
+        raw = {"chunks": raw_chunks}
+        if usage:
+            raw["usage"] = usage
+        return "".join(text_parts), raw
 
     @staticmethod
     def _extract_text(data: Dict[str, Any]) -> str | None:
@@ -128,10 +181,10 @@ class KimiClient:
         with self.log_path.open("a", encoding="utf-8") as logfile:
             logfile.write(payload + "\n")
 
+
 def _truncate_json(data: Any, length: int = 2000) -> str:
     try:
         payload = json.dumps(data, ensure_ascii=False)
     except Exception:
         payload = str(data)
     return payload[:length]
-

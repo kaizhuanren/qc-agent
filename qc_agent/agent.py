@@ -290,7 +290,12 @@ def build_qc_app(config: AgentConfig):
         chat_messages = [ChatMessage(**msg) for msg in messages]
         text = ""
         try:
-            response = kimi.chat(chat_messages, temperature=config.temperature, max_output_tokens=config.max_output_tokens)
+            response = kimi.chat(
+                chat_messages,
+                temperature=config.temperature,
+                max_output_tokens=config.max_output_tokens,
+                stream=True,
+            )
             text = response["text"]
             parsed = _safe_parse_json(text)
         except (KimiClientError, json.JSONDecodeError) as exc:

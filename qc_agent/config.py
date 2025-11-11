@@ -23,7 +23,7 @@ class AgentConfig:
     kimi_base_url: str = field(default_factory=lambda: os.getenv("KIMI_API_BASE", "https://api.moonshot.cn/v1"))
     kimi_model: str = field(default_factory=lambda: os.getenv("KIMI_MODEL", "kimi-k2-0905-preview"))
     kimi_retry: int = 3
-    kimi_timeout: int = 120
+    kimi_timeout: int = 300
 
     gemini_api_key: str = field(default_factory=lambda: os.getenv("GEMINI_API_KEY", ""))
     gemini_model: str = field(default_factory=lambda: os.getenv("GEMINI_MODEL", "gemini-2.5-flash"))
@@ -34,7 +34,7 @@ class AgentConfig:
     reflection_model: str = field(default_factory=lambda: os.getenv("REFLECTION_MODEL", "kimi-k2-thinking"))
     reflection_api_key: str = field(default_factory=lambda: os.getenv("REFLECTION_API_KEY", ""))
     reflection_base_url: str = field(default_factory=lambda: os.getenv("REFLECTION_BASE_URL", "https://api.moonshot.cn/v1"))
-    reflection_timeout: int = field(default_factory=lambda: int(os.getenv("REFLECTION_TIMEOUT", "120")))
+    reflection_timeout: int = field(default_factory=lambda: int(os.getenv("REFLECTION_TIMEOUT", "300")))
     reflection_retry: int = field(default_factory=lambda: int(os.getenv("REFLECTION_RETRY", "3")))
 
     rule_top_k: int = 10
@@ -58,6 +58,8 @@ class AgentConfig:
     reflection_log_path: Path = field(init=False)
 
     def __post_init__(self) -> None:
+        model_config_path = Path(self.model_config_path)
+        object.__setattr__(self, "model_config_path", model_config_path)
         model_config_path = Path(self.model_config_path)
         object.__setattr__(self, "model_config_path", model_config_path)
         self._apply_model_overrides()

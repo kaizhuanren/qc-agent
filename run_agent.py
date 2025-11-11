@@ -42,13 +42,11 @@ def build_dataset(records_file: Path, split_file: Path) -> List[Dict[str, Any]]:
         fields = split_map.get(rid, {})
         if not fields:
             continue
-        dataset.append(
-            {
-                "record_id": rid,
-                "fields": fields,
-                "problems": record.get("problems"),
-            }
-        )
+        dataset.append({
+            "record_id": rid,
+            "fields": fields,
+            "problems": record.get("problems"),
+        })
     return dataset
 
 
@@ -59,6 +57,54 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--output", type=Path, default=Path("outputs/predictions.jsonl"))
     parser.add_argument("--format", choices=["jsonl", "json"], default="jsonl", help="Output format")
     return parser.parse_args()
+
+
+def write_jsonl(app, dataset, writer) -> None:
+    for record in dataset:
+        state = {"record_id": record["record_id"], "fields": record["fields"]}
+        result = app.invoke(state)
+        llm_payload = result.get("llm_response", {})
+        payload = {
+            "record_id": record["record_id"],
+            **llm_payload,
+            "raw_text": result.get("raw_text", ""),
+        }
+        writer.write(json.dumps(payload, ensure_ascii=False) + "\n")
+        writer.flush()
+        print(
+            f"Processed {record['record_id']} -> {len(llm_payload.get('problems', []))} problems, "
+            f"{len(llm_payload.get('notes', []))} notes"
+        )
+
+
+def write_json(app, dataset, writer) -> None:
+    writer.write("[\n")
+    first = True
+    for record in dataset:
+        state = {"record_id": record["record_id"], "fields": record["fields"]}
+        result = app.invoke(state)
+        llm_payload = result.get("llm_response", {})
+        payload = {
+            "record_id": record["record_id"],
+            **llm_payload,
+            "raw_text": result.get("raw_text", ""),
+        }
+        # 格式化JSON并添加适当的缩进
+        entry_lines = json.dumps(payload, ensure_ascii=False, indent=2).split('\n')
+        # 为每一行添加2个空格的缩进
+        indented_entry = '\n'.join('  ' + line for line in entry_lines)
+        
+        # 写入逗号（如果不是第一条）和缩进后的JSON
+        if not first:
+            writer.write(',\n')
+        writer.write(indented_entry)
+        writer.flush()
+        first = False
+        print(
+            f"Processed {record['record_id']} -> {len(llm_payload.get('problems', []))} problems, "
+            f"{len(llm_payload.get('notes', []))} notes"
+        )
+    writer.write("\n]")
 
 
 def main() -> None:
@@ -78,39 +124,12 @@ def main() -> None:
         dataset = dataset[: args.limit]
 
     app = build_qc_app(config)
-    results = []
+
     with output_path.open("w", encoding="utf-8") as writer:
-        for record in dataset:
-            state = {"record_id": record["record_id"], "fields": record["fields"]}
-            result = app.invoke(state)
-            llm_payload = result.get("llm_response", {})
-            
-            if args.format == "json":
-                results.append({
-                    "record_id": record["record_id"],
-                    "problems": [{
-                        "field": p.get("field", ""),
-                        "issue_type": p.get("issue_type", ""),
-                        "rule_id": p.get("rule_id", ""),
-                        "description": p.get("short_reason", "")
-                    } for p in llm_payload.get("problems", [])]
-                })
-            else:
-                payload = {
-                    "record_id": record["record_id"],
-                    **llm_payload,
-                    "raw_text": result.get("raw_text", ""),
-                }
-                writer.write(json.dumps(payload, ensure_ascii=False) + "\n")
-            
-            print(
-                f"Processed {record['record_id']} -> {len(llm_payload.get('problems', []))} problems, "
-                f"{len(llm_payload.get('notes', []))} notes"
-            )
-    
-    if args.format == "json":
-        with output_path.open("w", encoding="utf-8") as f:
-            json.dump(results, f, ensure_ascii=False, indent=2)
+        if args.format == "json":
+            write_json(app, dataset, writer)
+        else:
+            write_jsonl(app, dataset, writer)
 
 
 if __name__ == "__main__":
