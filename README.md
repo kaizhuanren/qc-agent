@@ -61,10 +61,24 @@ pip3 install langgraph langchain-core langchain-text-splitters numpy scikit-lear
 ```bash
 export KIMI_API_KEY="sk-xxx"
 
-# 可选项：自定义域名与模型
+# 可选项：自定义域名与模型（默认模型为 kimi-k2-0905-preview）
 export KIMI_API_BASE="https://api.moonshot.cn/v1"
-export KIMI_MODEL="moonshot-v1-32k"
+export KIMI_MODEL="kimi-k2-0905-preview"
 ```
+
+### 🔧 使用 `config/models.json` 快速切换模型
+
+不想频繁改环境变量时，可在 `config/models.json` 中配置请求与反思模型，例如：
+
+```json
+{
+  "request_model": "kimi-k2-turbo-preview",
+  "reflection_model": "kimi-k2-turbo-preview",
+  "reflection_provider": "kimi"
+}
+```
+
+该文件优先级高于默认值，也可通过 `MODEL_CONFIG_PATH` 指向自定义路径；若需回到 Gemini 反思，把 `reflection_provider` 改为 `gemini` 即可。
 
 ---
 
@@ -167,3 +181,21 @@ pip3 install google-genai
 ```
 
 默认 rpm<=1：Gemini 客户端带速率限制与指数回退；Kimi 客户端自带空响应/超时重试。可在 `qc_agent/config.py` 调整模型名与重试策略。
+
+
+### Reflection Provider选项
+- `REFLECTION_PROVIDER`: `gemini` (默认) 或 `kimi`/`openai`，用于指定反思器模型来源。
+- `REFLECTION_MODEL`: 反思模型名，例如 `gemini-2.5-flash` 或 `kimi-k2-thinking`。
+- `REFLECTION_API_KEY`/`REFLECTION_BASE_URL`: 当使用 openai/kimi 兼容接口时指定；默认为主 Kimi 配置。
+- 运行示例：
+```bash
+export REFLECTION_PROVIDER=kimi
+export REFLECTION_MODEL=kimi-k2-thinking
+export REFLECTION_API_KEY="$KIMI_API_KEY"
+```
+反思层会在低置信/家族越界案件上调用该模型做二次校对。
+
+### 🪵 请求日志
+
+默认会将每次 Kimi 调用记录到 `logs/kimi_requests.log`（反思阶段写入 `logs/reflection_requests.log`），其中包含模型、请求摘要、响应片段及错误，便于定位“返回为空/超时”等问题。可通过 `LOG_DIR` 或 `MODEL_CONFIG_PATH` 指向自定义目录。
+

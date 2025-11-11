@@ -3,7 +3,9 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Any, Dict, List, Sequence
+import json
 import logging
 import time
 
@@ -26,7 +28,7 @@ class KimiClientError(RuntimeError):
 class KimiClient:
     """Blocking client for the Kimi chat completions endpoint with retries."""
 
-    def __init__(self, api_key: str, base_url: str, model: str, retry: int = 3, timeout: int = 120) -> None:
+    def __init__(self, api_key: str, base_url: str, model: str, retry: int = 3, timeout: int = 120, log_path: Path | None = None) -> None:
         if not api_key:
             raise ValueError("KIMI_API_KEY is missing; please set the environment variable.")
         self.api_key = api_key
@@ -35,6 +37,9 @@ class KimiClient:
         self.retry = max(1, retry)
         self.timeout = timeout
         self.session = requests.Session()
+        self.log_path = Path(log_path) if log_path else None
+        if self.log_path:
+            self.log_path.parent.mkdir(parents=True, exist_ok=True)
 
     def chat(
         self,
@@ -54,9 +59,17 @@ class KimiClient:
             "Authorization": f"Bearer {self.api_key}",
             "Content-Type": "application/json",
         }
+        serialized_messages = [{"role": m.role, "content": m.content} for m in messages]
 
         last_error: Exception | None = None
         for attempt in range(self.retry):
+            log_meta = {
+                "model": self.model,
+                "attempt": attempt + 1,
+                "temperature": temperature,
+                "max_tokens": max_output_tokens,
+                "messages": serialized_messages,
+            }
             try:
                 resp = self.session.post(url, headers=headers, json=payload, timeout=self.timeout)
                 if resp.status_code >= 300:
@@ -65,12 +78,16 @@ class KimiClient:
                 data = resp.json()
                 text = self._extract_text(data)
                 if text and text.strip():
+                    self._log_entry({**log_meta, "status": "success", "response": _truncate_json(data)})
                     return {"text": text.strip(), "raw": data}
+                logger.warning("Kimi empty content, raw=%s", _truncate_json(data))
+                self._log_entry({**log_meta, "status": "empty", "response": _truncate_json(data)})
                 raise KimiClientError("Kimi API returned empty content")
-            except (requests.Timeout, requests.ConnectionError, KimiClientError) as exc:
+            except (requests.Timeout, requests.ConnectionError, KimiClientError, ValueError) as exc:
                 last_error = exc
                 backoff = 2 ** attempt
                 logger.warning("Kimi request failed (attempt %s/%s): %s", attempt + 1, self.retry, exc)
+                self._log_entry({**log_meta, "status": "error", "error": str(exc)})
                 time.sleep(backoff)
         raise KimiClientError(f"Kimi chat failed after {self.retry} attempts: {last_error}")
 
@@ -85,8 +102,8 @@ class KimiClient:
             if isinstance(content, list):
                 parts: List[str] = []
                 for item in content:
-                    if isinstance(item, dict) and item.get("type") == "text":
-                        parts.append(item.get("text", ""))
+                    if isinstance(item, dict) and item.get("type") in {"text", "output_text", "message"}:
+                        parts.append(item.get("text", item.get("value", "")))
                 if parts:
                     return "".join(parts)
         output = data.get("output")
@@ -99,3 +116,22 @@ class KimiClient:
             if parts:
                 return "".join(parts)
         return None
+
+    def _log_entry(self, entry: Dict[str, Any]) -> None:
+        if not self.log_path:
+            return
+        entry.setdefault("ts", time.time())
+        try:
+            payload = json.dumps(entry, ensure_ascii=False)
+        except Exception:
+            payload = str(entry)
+        with self.log_path.open("a", encoding="utf-8") as logfile:
+            logfile.write(payload + "\n")
+
+def _truncate_json(data: Any, length: int = 2000) -> str:
+    try:
+        payload = json.dumps(data, ensure_ascii=False)
+    except Exception:
+        payload = str(data)
+    return payload[:length]
+

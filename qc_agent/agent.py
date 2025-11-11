@@ -43,6 +43,7 @@ class AgentState(TypedDict, total=False):
     fixes_raw: List[Any]
     audit: Dict[str, Any]
     raw_text: str
+    llm_response: Dict[str, Any]
 
 
 def _safe_parse_json(text: str) -> Dict[str, Any]:
@@ -229,19 +230,44 @@ def build_qc_app(config: AgentConfig):
         model=config.kimi_model,
         retry=config.kimi_retry,
         timeout=config.kimi_timeout,
+        log_path=config.kimi_log_path,
     )
-    gemini = None
-    if config.has_gemini_key:
-        try:
-            gemini = GeminiClient(
-                api_key=config.gemini_api_key,
-                model=config.gemini_model,
-                rpm_limit=config.gemini_rpm_limit,
-                max_retries=config.gemini_max_retries,
-            )
-        except Exception as exc:  # pragma: no cover
-            logger.warning("Gemini client unavailable: %s", exc)
-            gemini = None
+
+    reflection_runtime: tuple[str, Any] | None = None
+    provider = (config.reflection_provider or "gemini").lower()
+    if provider == "gemini":
+        if config.has_gemini_key:
+            try:
+                gemini_client = GeminiClient(
+                    api_key=config.gemini_api_key,
+                    model=config.reflection_model or config.gemini_model,
+                    rpm_limit=config.gemini_rpm_limit,
+                    max_retries=config.gemini_max_retries,
+                )
+                reflection_runtime = ("gemini", gemini_client)
+            except Exception as exc:  # pragma: no cover
+                logger.warning("Gemini client unavailable: %s", exc)
+        else:
+            logger.warning("Reflection provider set to gemini but GEMINI_API_KEY missing.")
+    elif provider in {"kimi", "openai"}:
+        api_key = (config.reflection_api_key or config.kimi_api_key).strip()
+        if not api_key:
+            logger.warning("Reflection provider %s missing API key; skipping reflection.", provider)
+        else:
+            try:
+                reflection_runtime = (
+                    "openai",
+                    KimiClient(
+                        api_key=api_key,
+                        base_url=config.reflection_base_url or config.kimi_base_url,
+                        model=config.reflection_model or config.kimi_model,
+                        retry=config.reflection_retry or config.kimi_retry,
+                        timeout=config.reflection_timeout or config.kimi_timeout,
+                        log_path=config.reflection_log_path,
+                    ),
+                )
+            except Exception as exc:  # pragma: no cover
+                logger.warning("Reflection client init failed: %s", exc)
 
     def prepare_node(state: AgentState) -> AgentState:
         fields = state.get("fields") or {}
@@ -286,18 +312,26 @@ def build_qc_app(config: AgentConfig):
         layer_c = state.get("layer_c", DEFAULT_LAYER_C_PATCHES)
         audit: Dict[str, Any] = {}
         suspects = _find_suspects(verdicts, config)
-        if gemini and suspects:
+        if reflection_runtime and suspects:
             prompt = build_reflection_prompt(state["record_id"], suspects, layer_c)
+            provider, client = reflection_runtime
+            audit["reflection_provider"] = provider
             try:
-                reflection = gemini.generate(prompt)
-                audit["reflection_raw"] = reflection.text
-                data = _safe_parse_json(reflection.text)
+                if provider == "gemini":
+                    reflection = client.generate(prompt)
+                    text_payload = reflection.text
+                else:
+                    messages = [ChatMessage(role="user", content=prompt)]
+                    resp = client.chat(messages, temperature=0.05, max_output_tokens=800)
+                    text_payload = resp["text"]
+                audit["reflection_raw"] = text_payload
+                data = _safe_parse_json(text_payload)
                 verdicts = _apply_reflections(verdicts, _ensure_list(data.get("revisions")))
                 patch_notes = _ensure_list(data.get("patch_notes"))
                 if patch_notes:
                     layer_c.extend(str(note) for note in patch_notes if note)
                 audit["reflection"] = data.get("why_short", "")
-            except (GeminiClientError, json.JSONDecodeError) as exc:  # pragma: no cover
+            except (GeminiClientError, KimiClientError, json.JSONDecodeError) as exc:  # pragma: no cover
                 audit["reflection_error"] = str(exc)
         return {
             "verdicts": verdicts,
