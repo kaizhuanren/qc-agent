@@ -57,6 +57,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--dataset", choices=["train", "test"], default="train")
     parser.add_argument("--limit", type=int, default=5, help="Number of records to process.")
     parser.add_argument("--output", type=Path, default=Path("outputs/predictions.jsonl"))
+    parser.add_argument("--format", choices=["jsonl", "json"], default="jsonl", help="Output format")
     return parser.parse_args()
 
 
@@ -77,21 +78,39 @@ def main() -> None:
         dataset = dataset[: args.limit]
 
     app = build_qc_app(config)
+    results = []
     with output_path.open("w", encoding="utf-8") as writer:
         for record in dataset:
             state = {"record_id": record["record_id"], "fields": record["fields"]}
             result = app.invoke(state)
             llm_payload = result.get("llm_response", {})
-            payload = {
-                "record_id": record["record_id"],
-                **llm_payload,
-                "raw_text": result.get("raw_text", ""),
-            }
-            writer.write(json.dumps(payload, ensure_ascii=False) + "\n")
+            
+            if args.format == "json":
+                results.append({
+                    "record_id": record["record_id"],
+                    "problems": [{
+                        "field": p.get("field", ""),
+                        "issue_type": p.get("issue_type", ""),
+                        "rule_id": p.get("rule_id", ""),
+                        "description": p.get("short_reason", "")
+                    } for p in llm_payload.get("problems", [])]
+                })
+            else:
+                payload = {
+                    "record_id": record["record_id"],
+                    **llm_payload,
+                    "raw_text": result.get("raw_text", ""),
+                }
+                writer.write(json.dumps(payload, ensure_ascii=False) + "\n")
+            
             print(
                 f"Processed {record['record_id']} -> {len(llm_payload.get('problems', []))} problems, "
                 f"{len(llm_payload.get('notes', []))} notes"
             )
+    
+    if args.format == "json":
+        with output_path.open("w", encoding="utf-8") as f:
+            json.dump(results, f, ensure_ascii=False, indent=2)
 
 
 if __name__ == "__main__":

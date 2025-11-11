@@ -53,7 +53,7 @@ rag_med/
 ### 2. 安装依赖
 
 ```bash
-pip3 install langgraph langchain-core langchain-text-splitters numpy scikit-learn requests
+pip install langgraph langchain-core langchain-text-splitters numpy scikit-learn requests
 ```
 
 ### 3. 设置 Kimi 环境变量
@@ -94,10 +94,22 @@ export KIMI_MODEL="kimi-k2-0905-preview"
 ### 示例：运行前 5 条测试数据
 
 ```bash
-python3 run_agent.py \
+# 输出详细 JSONL 格式（包含 verdicts, notes, audit 等调试信息）
+python run_agent.py \
   --dataset test \
   --limit 5 \
   --output outputs/test_pred.jsonl
+
+# 输出验证格式 JSON（仅包含 record_id 和 problems，用于提交）
+python run_agent.py \
+  --dataset test \
+  --limit 5 \
+  --output outputs/test_pred.json \
+  --format json
+
+# 验证输出格式
+python data/validate_pred_file.py outputs/test_pred.json
+```
 ```
 
 ### 查看输出结果
