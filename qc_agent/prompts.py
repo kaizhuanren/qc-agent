@@ -1,4 +1,4 @@
-"""Prompt builders for the QC agent."""
+"""Prompt builders for the ACE-QC agent."""
 
 from __future__ import annotations
 
@@ -8,38 +8,66 @@ import json
 from .rag import RuleDocument, FewShotExample
 
 
-SYSTEM_PROMPT = (
-    "你是一名熟悉中国住院病历质控规范的医疗质控专家。"
-    "需要根据提供的字段内容、标准质控规则以及示例，找出病历中的问题并输出 JSON。"
-    "请遵守：\n"
-    "1. 严格依据病历文字和规则，不要臆造信息。\n"
-    "2. 优先命中最明确、可落地的规则；若信息不足，描述理由并降低置信度。\n"
-    "3. 输出 JSON：{\"problems\": [...], \"fixes\": [...]}。每个 problem 含 field, issue_type, rule_id, description, confidence。\n"
-    "4. 校正建议（fixes）面向临床医生，只可补写允许的占位词（如“不详/未查/无”），不得捏造检查结果。\n"
+CONTRACT_SNIPPET = (
+    "【ACE-QC 输出契约】
+"
+    "- 严格输出 JSON；不得直接生成 problems。
+"
+    "- verdicts: 每条候选规则给 PASS/FAIL/N/A，含 rule_id/field/issue_type/confidence/evidence/short_reason。
+"
+    "- problems: 系统层将 verdicts 中 FAIL 派生；模型不可写。
+"
+    "- notes: PASS 或 N/A 的说明。
+"
+    "- fixes: 可执行建议，允许使用‘未详/不详/未予特殊处理’等占位词。
+"
+    "- metrics: 至少给出 deduction_total 与 summary。
+"
+    "- 证据优先：无证据不得 FAIL；引用原文片段或段落名。
+"
+    "- rule_id 必须来自系统列出的白名单。
+"
 )
 
+LAYER_C_BASE = [
+    "不得直接生成 problems，需由系统从 FAIL verdicts 派生",
+    "诊断遗漏/检查提示但未写入诊断 → IC-RZCB-01-V1",
+    "主诉无法导出第一诊断 → DQ-RZ-01-V1",
+    "以症状代替诊断 → DQ-RZ-02-V1",
+    "辅助检查缺少时间/地点/项目/结果任一 → EN-FZ-01-V1",
+    "现病史出现治疗但缺时间/地点/方式任一 → IC-XB-01-V1",
+]
 
-def _format_rules(rules: List[RuleDocument]) -> str:
+
+def _format_rule_catalog(rules: List[RuleDocument]) -> str:
     lines = []
     for idx, rule in enumerate(rules, start=1):
-        lines.append(f"规则 {idx}:")
-        lines.append(rule.text)
-        lines.append("")
-    return "\n".join(lines).strip()
+        lines.append(
+            f"{idx}. rule_id={rule.rule_id} | issue_type={rule.issue_type} | field={rule.field_en}
+"
+            f"   摘要：{rule.text.splitlines()[3] if rule.text else ''}"
+        )
+    return "
+".join(lines) if lines else "无匹配规则"
 
 
 def _format_examples(examples: List[FewShotExample]) -> str:
     if not examples:
-        return "无示例。"
+        return "无示例"
     blocks = []
     for idx, ex in enumerate(examples, start=1):
         output = json.dumps(ex.problems, ensure_ascii=False, indent=2) if ex.problems else "[]"
         blocks.append(
-            f"示例 {idx} (record_id={ex.record_id})\n"
-            f"输入字段摘要：\n{ex.text}\n"
-            f"输出 problems：\n{output}\n"
+            f"示例 {idx} (record_id={ex.record_id})
+"
+            f"字段摘要：
+{ex.text}
+"
+            f"历史 problems：{output}
+"
         )
-    return "\n".join(blocks).strip()
+    return "
+".join(blocks)
 
 
 def _format_fields(record_id: str, fields: Dict[str, Any]) -> str:
@@ -60,35 +88,93 @@ def _format_fields(record_id: str, fields: Dict[str, Any]) -> str:
         value = fields.get(key)
         if value is None or value == "":
             continue
-        if isinstance(value, list):
-            text = "；".join(map(str, value))
-        else:
-            text = str(value)
+        text = "；".join(map(str, value)) if isinstance(value, list) else str(value)
         lines.append(f"{label}：{text}")
-    return "\n".join(lines)
+    return "
+".join(lines)
 
 
-def build_messages(
+def build_verdict_messages(
     record_id: str,
     fields: Dict[str, Any],
     rules: List[RuleDocument],
-    examples: List[FewShotExample],
+    layer_c_patches: List[str],
+    examples: List[FewShotExample] | None = None,
 ) -> List[Dict[str, str]]:
-    rule_block = _format_rules(rules) or "无命中规则，按常规质控判断。"
-    example_block = _format_examples(examples)
+    rule_block = _format_rule_catalog(rules)
+    example_block = _format_examples(examples or [])
     field_block = _format_fields(record_id, fields)
+    layer_c = LAYER_C_BASE + layer_c_patches
     user_content = (
-        "【任务】\n"
-        "依据“规则知识库”审阅“待质控病历”，列出所有需要提示的问题以及整改建议。\n\n"
-        f"【规则知识库】\n{rule_block}\n\n"
-        f"【示例】\n{example_block}\n\n"
-        f"【待质控病历】\n{field_block}\n\n"
-        "【输出要求】\n"
-        "1. 只输出 JSON；字段顺序不限。\n"
-        "2. problems 中若无法确定某条规则是否命中，可在 description 中说明原因并设定 confidence 为 0.4 以下。\n"
-        "3. fixes 至少给出一条操作性建议；若无问题可提示\"不需修改\"。\n"
+        "【Layer A：任务契约】
+" + CONTRACT_SNIPPET + "
+
+"
+        "【Layer B：记录事实】
+" + field_block + "
+
+"
+        "【Layer C：最新补丁】
+" + "
+".join(layer_c) + "
+
+"
+        "【候选规则白名单】
+" + rule_block + "
+
+"
+        "【示例参考】
+" + example_block + "
+
+"
+        "【任务】
+"
+        "逐条评审上述候选规则，输出 JSON：{"verdicts": [...], "fixes": [...], "layer_c_patch": [...]}。
+"
+        "- verdicts 仅包含 PASS/FAIL/N/A；不得生成 problems。
+"
+        "- 每条 verdict 字段：rule_id, field, issue_type, verdict, confidence, evidence_spans[], short_reason。
+"
+        "- confidence 范围 0~1；证据需引用原文片段或段落名。
+"
+        "- 建议 (fixes) 可为字符串或对象，需对应 rule_id。
+"
+        "- 可在 layer_c_patch 中追加新的最小补丁提醒（可为空）。
+"
     )
     return [
-        {"role": "system", "content": SYSTEM_PROMPT},
+        {"role": "system", "content": CONTRACT_SNIPPET},
         {"role": "user", "content": user_content},
     ]
+
+
+def build_reflection_prompt(
+    record_id: str,
+    suspect_verdicts: List[Dict[str, Any]],
+    layer_c_patches: List[str],
+) -> str:
+    payload = json.dumps(suspect_verdicts, ensure_ascii=False, indent=2)
+    layer_c = LAYER_C_BASE + layer_c_patches
+    return (
+        "你是 ACE-QC 反思器，负责纠错与补丁。
+"
+        "输入是同一病历可疑 verdicts。请：
+"
+        "1) 如判错，给出 revised verdict（rule_id/field/verdict/confidence/evidence/short_reason）。
+"
+        "2) 如果仅需备注，写 reason 并维持 verdict。
+"
+        "3) 输出 JSON：{"revisions": [...], "patch_notes": [...], "why_short": "..."}
+"
+        "4) 只允许使用白名单 rule_id，不得生成 problems。
+"
+        "Layer C 补丁（供参考）：
+" + "
+".join(layer_c) + "
+
+"
+        f"record_id: {record_id}
+"
+        f"suspect_verdicts: {payload}
+"
+    )

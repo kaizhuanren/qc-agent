@@ -81,14 +81,17 @@ def main() -> None:
         for record in dataset:
             state = {"record_id": record["record_id"], "fields": record["fields"]}
             result = app.invoke(state)
+            llm_payload = result.get("llm_response", {})
             payload = {
                 "record_id": record["record_id"],
-                "problems": result.get("llm_response", {}).get("problems", []),
-                "fixes": result.get("llm_response", {}).get("fixes", []),
+                **llm_payload,
                 "raw_text": result.get("raw_text", ""),
             }
             writer.write(json.dumps(payload, ensure_ascii=False) + "\n")
-            print(f"Processed {record['record_id']} -> {len(payload['problems'])} problems")
+            print(
+                f"Processed {record['record_id']} -> {len(llm_payload.get('problems', []))} problems, "
+                f"{len(llm_payload.get('notes', []))} notes"
+            )
 
 
 if __name__ == "__main__":

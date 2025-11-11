@@ -126,6 +126,7 @@ def _format_fields(fields: Dict[str, Any]) -> str:
 class RAGStore:
     def __init__(self, rules_path: Path, train_records_path: Path, train_split_path: Path) -> None:
         self.rules = self._load_rules(rules_path)
+        self.rule_lookup: Dict[str, RuleDocument] = {rule.rule_id: rule for rule in self.rules}
         self.rule_retriever = BM25Retriever([rule.text for rule in self.rules])
         self.examples = self._load_examples(train_records_path, train_split_path)
         self.example_retriever = BM25Retriever([ex.text for ex in self.examples]) if self.examples else None
@@ -191,6 +192,9 @@ class RAGStore:
                 continue
             results.append(self.examples[idx])
         return results
+
+    def get_rule(self, rule_id: str) -> RuleDocument | None:
+        return self.rule_lookup.get(rule_id)
 
 
 def build_query_text(fields: Dict[str, Any]) -> str:

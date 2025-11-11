@@ -5,6 +5,8 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Any, Dict, List, Sequence
 import logging
+import time
+
 import requests
 
 
@@ -22,14 +24,16 @@ class KimiClientError(RuntimeError):
 
 
 class KimiClient:
-    """Minimal blocking client for the `responses` endpoint."""
+    """Blocking client for the Kimi chat completions endpoint with retries."""
 
-    def __init__(self, api_key: str, base_url: str, model: str) -> None:
+    def __init__(self, api_key: str, base_url: str, model: str, retry: int = 3, timeout: int = 120) -> None:
         if not api_key:
             raise ValueError("KIMI_API_KEY is missing; please set the environment variable.")
         self.api_key = api_key
         self.base_url = base_url.rstrip("/")
         self.model = model
+        self.retry = max(1, retry)
+        self.timeout = timeout
         self.session = requests.Session()
 
     def chat(
@@ -38,7 +42,7 @@ class KimiClient:
         temperature: float = 0.2,
         max_output_tokens: int = 1200,
     ) -> Dict[str, Any]:
-        url = f"{self.base_url}/responses"
+        url = f"{self.base_url}/chat/completions"
         payload = {
             "model": self.model,
             "messages": [{"role": m.role, "content": m.content} for m in messages],
@@ -50,26 +54,41 @@ class KimiClient:
             "Authorization": f"Bearer {self.api_key}",
             "Content-Type": "application/json",
         }
-        resp = self.session.post(url, headers=headers, json=payload, timeout=120)
-        if resp.status_code >= 300:
-            logger.error("Kimi API error %s: %s", resp.status_code, resp.text[:2000])
-            raise KimiClientError(f"Kimi API failed: {resp.status_code}")
-        data = resp.json()
-        text = self._extract_text(data)
-        if text is None:
-            raise KimiClientError("Kimi API returned no assistant text.")
-        return {"text": text.strip(), "raw": data}
+
+        last_error: Exception | None = None
+        for attempt in range(self.retry):
+            try:
+                resp = self.session.post(url, headers=headers, json=payload, timeout=self.timeout)
+                if resp.status_code >= 300:
+                    logger.warning("Kimi API error %s: %s", resp.status_code, resp.text[:2000])
+                    raise KimiClientError(f"Kimi API failed: {resp.status_code}")
+                data = resp.json()
+                text = self._extract_text(data)
+                if text and text.strip():
+                    return {"text": text.strip(), "raw": data}
+                raise KimiClientError("Kimi API returned empty content")
+            except (requests.Timeout, requests.ConnectionError, KimiClientError) as exc:
+                last_error = exc
+                backoff = 2 ** attempt
+                logger.warning("Kimi request failed (attempt %s/%s): %s", attempt + 1, self.retry, exc)
+                time.sleep(backoff)
+        raise KimiClientError(f"Kimi chat failed after {self.retry} attempts: {last_error}")
 
     @staticmethod
     def _extract_text(data: Dict[str, Any]) -> str | None:
-        # Format 1: OpenAI-compatible choices
         choices = data.get("choices")
         if isinstance(choices, list) and choices:
             message = choices[0].get("message", {})
             content = message.get("content")
             if isinstance(content, str):
                 return content
-        # Format 2: responses API output blocks
+            if isinstance(content, list):
+                parts: List[str] = []
+                for item in content:
+                    if isinstance(item, dict) and item.get("type") == "text":
+                        parts.append(item.get("text", ""))
+                if parts:
+                    return "".join(parts)
         output = data.get("output")
         if isinstance(output, list):
             parts: List[str] = []

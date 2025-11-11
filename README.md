@@ -149,3 +149,21 @@ head outputs/test_pred.jsonl
 2. **优化输出结构**：将 `fixes` 拆为「整改要点 + 模板文稿」
 3. **基于标注集误差分析**：计算命中率 / 误报率，迭代 prompt 与检索语料
 
+
+## ACE-QC (Agentic Context Engineering) Pipeline
+
+- **Layer A (契约层)：** 在提示中锁定输出契约、规则白名单与禁止事项。
+- **Layer B (事实层)：** 按病历裁剪的字段/结构化事实。
+- **Layer C (补丁层)：** 反思器产出的最小修复提示，逐批演化。
+- **多代理协同：** Kimi 负责抽取/规则评审/生成 verdicts；Gemini 仅在疑难或家族越界时反思与纠错。
+- **产出契约：** `verdicts` → `problems/notes` 由系统派生，永不让 LLM 直接写 problems。
+
+## Dual-LLM Setup
+
+```bash
+export KIMI_API_KEY="sk-..."
+export GEMINI_API_KEY="ya29...."
+pip3 install google-genai
+```
+
+默认 rpm<=1：Gemini 客户端带速率限制与指数回退；Kimi 客户端自带空响应/超时重试。可在 `qc_agent/config.py` 调整模型名与重试策略。
