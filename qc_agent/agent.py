@@ -150,7 +150,10 @@ def _derive_outputs(
     for idx, verdict in enumerate(verdicts):
         verdict["index"] = idx
         if verdict["verdict"] == "FAIL" and verdict["confidence"] >= threshold:
-            problems.append(verdict)
+            # 为 problems 添加 description 字段（映射自 short_reason）
+            problem = dict(verdict)
+            problem["description"] = problem.get("short_reason", "")
+            problems.append(problem)
         else:
             notes.append(verdict)
     fixes: List[Dict[str, str]] = []
