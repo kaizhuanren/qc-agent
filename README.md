@@ -10,7 +10,7 @@
 
 * **结构化数据**：`train/test` 病历与标注数据
 * **规则文件**：`data/rules.jsonl`（定义质控规则与约束）
-* **LangGraph 流水线**：RAG 检索 → few-shot 示例 → Kimi API 调用 → JSON 解析
+* **LangGraph 流水线**：RAG 检索 → few-shot 示例 → OpenRouter API 调用 → JSON 解析
 
 最终可批量输出以下字段：
 
@@ -18,7 +18,7 @@
 * `fixes`（修复建议）
 * `corrected_emr`（可选修正版）
 
-> ⚠️ 注意：所有 LLM 调用依赖 Kimi（Moonshot）API。运行前需确保拥有合法的 API Key，并符合单位内网安全要求。
+> ⚠️ 注意：所有 LLM 调用依赖 OpenRouter（OpenAI 兼容）API。运行前需确保拥有合法的 API Key，并符合单位内网安全要求。
 
 ---
 
@@ -27,8 +27,8 @@
 ```
 rag_med/
 ├── qc_agent/                 # Agent 核心代码
-│   ├── config.py             # 全局配置（路径、Kimi 参数等）
-│   ├── kimi.py               # Moonshot API 客户端
+│   ├── config.py             # 全局配置（路径、OpenRouter 参数等）
+│   ├── openrouter.py         # OpenRouter API 客户端
 │   ├── rag.py                # 规则/示例检索逻辑
 │   ├── prompts.py            # 提示词模板
 │   └── agent.py              # LangGraph 主流程（prepare → llm）
@@ -56,14 +56,14 @@ rag_med/
 pip install langgraph langchain-core langchain-text-splitters numpy scikit-learn requests
 ```
 
-### 3. 设置 Kimi 环境变量
+### 3. 设置 OpenRouter 环境变量
 
 ```bash
-export KIMI_API_KEY="sk-xxx"
+export OPENROUTER_API_KEY="sk-xxx"
 
-# 可选项：自定义域名与模型（默认模型为 kimi-k2-0905-preview）
-export KIMI_API_BASE="https://api.moonshot.cn/v1"
-export KIMI_MODEL="kimi-k2-0905-preview"
+# 可选项：自定义域名与模型（默认模型为 openai/gpt-4o-mini）
+export OPENROUTER_BASE_URL="https://openrouter.ai/api/v1"
+export OPENROUTER_MODEL="openai/gpt-4o-mini"
 ```
 
 ### 🔧 使用 `config/models.json` 快速切换模型
@@ -72,13 +72,12 @@ export KIMI_MODEL="kimi-k2-0905-preview"
 
 ```json
 {
-  "request_model": "kimi-k2-turbo-preview",
-  "reflection_model": "kimi-k2-turbo-preview",
-  "reflection_provider": "kimi"
+  "request_model": "openai/gpt-4o-mini",
+  "reflection_model": "anthropic/claude-3.5-haiku"
 }
 ```
 
-该文件优先级高于默认值，也可通过 `MODEL_CONFIG_PATH` 指向自定义路径；若需回到 Gemini 反思，把 `reflection_provider` 改为 `gemini` 即可。
+该文件优先级高于默认值，也可通过 `MODEL_CONFIG_PATH` 指向自定义路径；如需禁用反思，将 `reflection_model` 设为空字符串即可。
 
 ---
 
@@ -88,7 +87,7 @@ export KIMI_MODEL="kimi-k2-0905-preview"
 
 1. 读取指定数据集（`train_emr_split.json` 或 `test_emr_split.json`）
 2. 用 **BM25** 检索最相关的规则与 few-shot 示例
-3. 构建 prompt 并调用 Kimi API
+3. 构建 prompt 并调用 OpenRouter API
 4. 解析并保存 JSON 输出至 `outputs/*.jsonl`
 
 ### 示例：运行前 5 条测试数据
@@ -155,7 +154,7 @@ head outputs/test_pred.jsonl
 * **Prompt 扩展**：`qc_agent/prompts.py` 中可加入医学知识包或约束
 * **语料补充**：在 `data/rules.jsonl` 与 `data/train.json` 中添加更多规则与示例
 * **本地调试（无 API Key）**：
-  在 `qc_agent/kimi.py` 中 mock `KimiClient.chat` 返回固定 JSON，即可快速跑通流程
+  在 `qc_agent/openrouter.py` 中 mock `OpenRouterClient.chat` 返回固定 JSON，即可快速跑通流程
 
 ---
 
@@ -163,7 +162,7 @@ head outputs/test_pred.jsonl
 
 | 问题                        | 解决方法                                    |
 | ------------------------- | --------------------------------------- |
-| `KIMI_API_KEY is missing` | 确认已设置环境变量或在 `AgentConfig` 中填写           |
+| `OPENROUTER_API_KEY is missing` | 确认已设置环境变量或在 `AgentConfig` 中填写           |
 | SSL / LibreSSL 警告         | macOS 自带 Python 触发，可忽略或升级 OpenSSL       |
 | JSON 解析失败                 | `agent.py` 已内置容错；可在 prompt 强调“仅输出 JSON” |
 
@@ -181,33 +180,28 @@ head outputs/test_pred.jsonl
 - **Layer A (契约层)：** 在提示中锁定输出契约、规则白名单与禁止事项。
 - **Layer B (事实层)：** 按病历裁剪的字段/结构化事实。
 - **Layer C (补丁层)：** 反思器产出的最小修复提示，逐批演化。
-- **多代理协同：** Kimi 负责抽取/规则评审/生成 verdicts；Gemini 仅在疑难或家族越界时反思与纠错。
+- **多代理协同：** OpenRouter 请求模型负责抽取/规则评审/生成 verdicts；可选的 OpenRouter 反思模型仅在疑难或家族越界时修正结论。
 - **产出契约：** `verdicts` → `problems/notes` 由系统派生，永不让 LLM 直接写 problems。
 
-## Dual-LLM Setup
+## Request + Reflection Setup
 
 ```bash
-export KIMI_API_KEY="sk-..."
-export GEMINI_API_KEY="ya29...."
-pip3 install google-genai
+export OPENROUTER_API_KEY="sk-..."          # 请求与默认反思模型复用
+export OPENROUTER_MODEL="openai/gpt-4o-mini" # 主流程模型
+export REFLECTION_MODEL="anthropic/claude-3.5-haiku"  # 可选：独立反思模型
+# 若反思模型需要单独 Key，可再指定：
+export REFLECTION_API_KEY="sk-..."
 ```
 
-默认 rpm<=1：Gemini 客户端带速率限制与指数回退；Kimi 客户端自带空响应/超时重试。可在 `qc_agent/config.py` 调整模型名与重试策略。
+默认会沿用 `OPENROUTER_BASE_URL`/`OPENROUTER_TIMEOUT` 等配置；可在 `qc_agent/config.py` 中调整请求/反思的超时与重试策略。
 
 
-### Reflection Provider选项
-- `REFLECTION_PROVIDER`: `gemini` (默认) 或 `kimi`/`openai`，用于指定反思器模型来源。
-- `REFLECTION_MODEL`: 反思模型名，例如 `gemini-2.5-flash` 或 `kimi-k2-thinking`。
-- `REFLECTION_API_KEY`/`REFLECTION_BASE_URL`: 当使用 openai/kimi 兼容接口时指定；默认为主 Kimi 配置。
-- 运行示例：
-```bash
-export REFLECTION_PROVIDER=kimi
-export REFLECTION_MODEL=kimi-k2-thinking
-export REFLECTION_API_KEY="$KIMI_API_KEY"
-```
+### Reflection 选项
+- `REFLECTION_MODEL`: 反思模型名（留空即可禁用反思层）。
+- `REFLECTION_API_KEY`: 可选，未配置则沿用 `OPENROUTER_API_KEY`。
+- `REFLECTION_BASE_URL`: 可选，未配置则沿用主 OpenRouter Base URL。
 反思层会在低置信/家族越界案件上调用该模型做二次校对。
 
 ### 🪵 请求日志
 
-默认会将每次 Kimi 调用记录到 `logs/kimi_requests.log`（反思阶段写入 `logs/reflection_requests.log`），其中包含模型、请求摘要、响应片段及错误，便于定位“返回为空/超时”等问题。可通过 `LOG_DIR` 或 `MODEL_CONFIG_PATH` 指向自定义目录。
-
+默认会将每次 OpenRouter 调用记录到 `logs/openrouter_requests.log`（反思阶段写入 `logs/reflection_requests.log`），其中包含模型、请求摘要、响应片段及错误，便于定位“返回为空/超时”等问题。可通过 `LOG_DIR` 或 `MODEL_CONFIG_PATH` 指向自定义目录。

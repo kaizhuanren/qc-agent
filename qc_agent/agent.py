@@ -11,8 +11,7 @@ import re
 from langgraph.graph import StateGraph, START, END
 
 from .config import AgentConfig
-from .kimi import KimiClient, ChatMessage, KimiClientError
-from .gemini import GeminiClient, GeminiClientError  # type: ignore
+from .openrouter import OpenRouterClient, ChatMessage, OpenRouterClientError
 from .rag import RAGStore, build_query_text, RuleDocument, FewShotExample
 from .prompts import build_verdict_messages, build_reflection_prompt
 
@@ -38,7 +37,7 @@ class AgentState(TypedDict, total=False):
     examples: List[FewShotExample]
     rule_lookup: Dict[str, RuleDocument]
     layer_c: List[str]
-    kimi_payload: Dict[str, Any]
+    request_payload: Dict[str, Any]
     verdicts: List[Dict[str, Any]]
     fixes_raw: List[Any]
     audit: Dict[str, Any]
@@ -227,47 +226,33 @@ def _apply_reflections(verdicts: List[Dict[str, Any]], revisions: List[Dict[str,
 
 def build_qc_app(config: AgentConfig):
     rag_store = RAGStore(config.rules_path, config.train_records_path, config.train_split_path)
-    kimi = KimiClient(
-        api_key=config.kimi_api_key,
-        base_url=config.kimi_base_url,
-        model=config.kimi_model,
-        retry=config.kimi_retry,
-        timeout=config.kimi_timeout,
-        log_path=config.kimi_log_path,
+    request_client = OpenRouterClient(
+        api_key=config.request_api_key,
+        base_url=config.request_base_url,
+        model=config.request_model,
+        retry=config.request_retry,
+        timeout=config.request_timeout,
+        log_path=config.request_log_path,
+        referer=config.request_referer,
+        app_name=config.request_app_name,
     )
 
-    reflection_runtime: tuple[str, Any] | None = None
-    provider = (config.reflection_provider or "gemini").lower()
-    if provider == "gemini":
-        if config.has_gemini_key:
-            try:
-                gemini_client = GeminiClient(
-                    api_key=config.gemini_api_key,
-                    model=config.reflection_model or config.gemini_model,
-                    rpm_limit=config.gemini_rpm_limit,
-                    max_retries=config.gemini_max_retries,
-                )
-                reflection_runtime = ("gemini", gemini_client)
-            except Exception as exc:  # pragma: no cover
-                logger.warning("Gemini client unavailable: %s", exc)
-        else:
-            logger.warning("Reflection provider set to gemini but GEMINI_API_KEY missing.")
-    elif provider in {"kimi", "openai"}:
-        api_key = (config.reflection_api_key or config.kimi_api_key).strip()
-        if not api_key:
-            logger.warning("Reflection provider %s missing API key; skipping reflection.", provider)
+    reflection_client: OpenRouterClient | None = None
+    if config.has_reflection_model:
+        reflection_api_key = config.reflection_api_token
+        if not reflection_api_key:
+            logger.warning("Reflection model configured but API key missing; skipping reflection.")
         else:
             try:
-                reflection_runtime = (
-                    "openai",
-                    KimiClient(
-                        api_key=api_key,
-                        base_url=config.reflection_base_url or config.kimi_base_url,
-                        model=config.reflection_model or config.kimi_model,
-                        retry=config.reflection_retry or config.kimi_retry,
-                        timeout=config.reflection_timeout or config.kimi_timeout,
-                        log_path=config.reflection_log_path,
-                    ),
+                reflection_client = OpenRouterClient(
+                    api_key=reflection_api_key,
+                    base_url=config.reflection_base_url or config.request_base_url,
+                    model=config.reflection_model,
+                    retry=config.reflection_retry or config.request_retry,
+                    timeout=config.reflection_timeout or config.request_timeout,
+                    log_path=config.reflection_log_path,
+                    referer=config.request_referer,
+                    app_name=config.request_app_name,
                 )
             except Exception as exc:  # pragma: no cover
                 logger.warning("Reflection client init failed: %s", exc)
@@ -285,7 +270,7 @@ def build_qc_app(config: AgentConfig):
             "rule_lookup": rag_store.rule_lookup,
         }
 
-    def kimi_node(state: AgentState) -> AgentState:
+    def request_node(state: AgentState) -> AgentState:
         record_id = state["record_id"]
         fields = state.get("fields") or {}
         layer_c = state.get("layer_c", DEFAULT_LAYER_C_PATCHES)
@@ -293,7 +278,7 @@ def build_qc_app(config: AgentConfig):
         chat_messages = [ChatMessage(**msg) for msg in messages]
         text = ""
         try:
-            response = kimi.chat(
+            response = request_client.chat(
                 chat_messages,
                 temperature=config.temperature,
                 max_output_tokens=config.max_output_tokens,
@@ -301,37 +286,32 @@ def build_qc_app(config: AgentConfig):
             )
             text = response["text"]
             parsed = _safe_parse_json(text)
-        except (KimiClientError, json.JSONDecodeError) as exc:
-            logger.error("Kimi failed for %s: %s", record_id, exc)
-            parsed = {"verdicts": [], "fixes": [], "layer_c_patch": [f"Kimi错误:{exc}"]}
+        except (OpenRouterClientError, json.JSONDecodeError) as exc:
+            logger.error("OpenRouter failed for %s: %s", record_id, exc)
+            parsed = {"verdicts": [], "fixes": [], "layer_c_patch": [f"OpenRouter错误:{exc}"]}
         layer_patch = _ensure_list(parsed.get("layer_c_patch"))
         updated_layer_c = list(dict.fromkeys(layer_c + layer_patch))
         return {
-            "kimi_payload": parsed,
+            "request_payload": parsed,
             "raw_text": text,
             "layer_c": updated_layer_c,
         }
 
     def reflection_node(state: AgentState) -> AgentState:
-        parsed = state.get("kimi_payload", {})
+        parsed = state.get("request_payload", {})
         fields = state.get("fields") or {}
         verdicts = _normalize_verdicts(_ensure_list(parsed.get("verdicts")), state.get("rule_lookup", {}), fields)
         fixes_raw = _ensure_list(parsed.get("fixes"))
         layer_c = state.get("layer_c", DEFAULT_LAYER_C_PATCHES)
         audit: Dict[str, Any] = {}
         suspects = _find_suspects(verdicts, config)
-        if reflection_runtime and suspects:
+        if reflection_client and suspects:
             prompt = build_reflection_prompt(state["record_id"], suspects, layer_c)
-            provider, client = reflection_runtime
-            audit["reflection_provider"] = provider
+            audit["reflection_provider"] = "openrouter"
             try:
-                if provider == "gemini":
-                    reflection = client.generate(prompt)
-                    text_payload = reflection.text
-                else:
-                    messages = [ChatMessage(role="user", content=prompt)]
-                    resp = client.chat(messages, temperature=0.05, max_output_tokens=800)
-                    text_payload = resp["text"]
+                messages = [ChatMessage(role="user", content=prompt)]
+                resp = reflection_client.chat(messages, temperature=0.05, max_output_tokens=800)
+                text_payload = resp["text"]
                 audit["reflection_raw"] = text_payload
                 data = _safe_parse_json(text_payload)
                 verdicts = _apply_reflections(verdicts, _ensure_list(data.get("revisions")))
@@ -339,7 +319,7 @@ def build_qc_app(config: AgentConfig):
                 if patch_notes:
                     layer_c.extend(str(note) for note in patch_notes if note)
                 audit["reflection"] = data.get("why_short", "")
-            except (GeminiClientError, KimiClientError, json.JSONDecodeError) as exc:  # pragma: no cover
+            except (OpenRouterClientError, json.JSONDecodeError) as exc:  # pragma: no cover
                 audit["reflection_error"] = str(exc)
         return {
             "verdicts": verdicts,
@@ -362,12 +342,12 @@ def build_qc_app(config: AgentConfig):
 
     graph = StateGraph(AgentState)
     graph.add_node("prepare", prepare_node)
-    graph.add_node("kimi", kimi_node)
+    graph.add_node("request", request_node)
     graph.add_node("reflect", reflection_node)
     graph.add_node("compile", compile_node)
     graph.add_edge(START, "prepare")
-    graph.add_edge("prepare", "kimi")
-    graph.add_edge("kimi", "reflect")
+    graph.add_edge("prepare", "request")
+    graph.add_edge("request", "reflect")
     graph.add_edge("reflect", "compile")
     graph.add_edge("compile", END)
     return graph.compile()

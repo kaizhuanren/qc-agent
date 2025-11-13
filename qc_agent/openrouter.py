@@ -1,10 +1,10 @@
-"""Lightweight client for the Kimi (Moonshot) API."""
+"""Lightweight client for the OpenRouter (OpenAI-compatible) API."""
 
 from __future__ import annotations
 
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Dict, List, Sequence, Optional
+from typing import Any, Dict, List, Mapping, Sequence, Optional
 import json
 import logging
 import time
@@ -20,12 +20,12 @@ class ChatMessage:
     content: str
 
 
-class KimiClientError(RuntimeError):
-    """Raised when the Kimi API fails."""
+class OpenRouterClientError(RuntimeError):
+    """Raised when the OpenRouter API fails."""
 
 
-class KimiClient:
-    """Blocking client for the Kimi chat completions endpoint with retries."""
+class OpenRouterClient:
+    """Blocking client for the OpenRouter chat completions endpoint with retries."""
 
     def __init__(
         self,
@@ -35,9 +35,12 @@ class KimiClient:
         retry: int = 3,
         timeout: int = 120,
         log_path: Optional[Path] = None,
+        referer: str = "",
+        app_name: str = "",
+        extra_headers: Optional[Mapping[str, str]] = None,
     ) -> None:
         if not api_key:
-            raise ValueError("KIMI_API_KEY is missing; please set the environment variable.")
+            raise ValueError("OPENROUTER_API_KEY is missing; please set the environment variable.")
         self.api_key = api_key
         self.base_url = base_url.rstrip("/")
         self.model = model
@@ -45,6 +48,14 @@ class KimiClient:
         self.timeout = timeout
         self.session = requests.Session()
         self.log_path = Path(log_path) if log_path else None
+        extras: Dict[str, str] = dict(extra_headers or {})
+        referer = referer.strip()
+        app_name = app_name.strip()
+        if referer:
+            extras.setdefault("HTTP-Referer", referer)
+        if app_name:
+            extras.setdefault("X-Title", app_name)
+        self.extra_headers = extras
         if self.log_path:
             self.log_path.parent.mkdir(parents=True, exist_ok=True)
 
@@ -67,6 +78,7 @@ class KimiClient:
             "Authorization": f"Bearer {self.api_key}",
             "Content-Type": "application/json",
         }
+        headers.update(self.extra_headers)
         serialized_messages = [{"role": m.role, "content": m.content} for m in messages]
 
         last_error: Exception | None = None
@@ -88,8 +100,8 @@ class KimiClient:
                     stream=stream,
                 )
                 if resp.status_code >= 300:
-                    logger.warning("Kimi API error %s: %s", resp.status_code, resp.text[:2000])
-                    raise KimiClientError(f"Kimi API failed: {resp.status_code}")
+                    logger.warning("OpenRouter API error %s: %s", resp.status_code, resp.text[:2000])
+                    raise OpenRouterClientError(f"OpenRouter API failed: {resp.status_code}")
                 if stream:
                     text, data = self._consume_stream(resp)
                 else:
@@ -98,16 +110,22 @@ class KimiClient:
                 if text and text.strip():
                     self._log_entry({**log_meta, "status": "success", "response": _truncate_json(data)})
                     return {"text": text.strip(), "raw": data}
-                logger.warning("Kimi empty content, raw=%s", _truncate_json(data))
+                logger.warning("OpenRouter empty content, raw=%s", _truncate_json(data))
                 self._log_entry({**log_meta, "status": "empty", "response": _truncate_json(data)})
-                raise KimiClientError("Kimi API returned empty content")
-            except (requests.Timeout, requests.ConnectionError, KimiClientError, ValueError, json.JSONDecodeError) as exc:
+                raise OpenRouterClientError("OpenRouter API returned empty content")
+            except (
+                requests.Timeout,
+                requests.ConnectionError,
+                OpenRouterClientError,
+                ValueError,
+                json.JSONDecodeError,
+            ) as exc:
                 last_error = exc
                 backoff = 2 ** attempt
-                logger.warning("Kimi request failed (attempt %s/%s): %s", attempt + 1, self.retry, exc)
+                logger.warning("OpenRouter request failed (attempt %s/%s): %s", attempt + 1, self.retry, exc)
                 self._log_entry({**log_meta, "status": "error", "error": str(exc)})
                 time.sleep(backoff)
-        raise KimiClientError(f"Kimi chat failed after {self.retry} attempts: {last_error}")
+        raise OpenRouterClientError(f"OpenRouter chat failed after {self.retry} attempts: {last_error}")
 
     def _consume_stream(self, resp: requests.Response) -> tuple[str, Dict[str, Any]]:
         text_parts: List[str] = []

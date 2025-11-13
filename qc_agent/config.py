@@ -19,23 +19,51 @@ class AgentConfig:
     test_split_path: Path = field(init=False)
     rules_path: Path = field(init=False)
 
-    kimi_api_key: str = field(default_factory=lambda: os.getenv("KIMI_API_KEY", ""))
-    kimi_base_url: str = field(default_factory=lambda: os.getenv("KIMI_API_BASE", "https://api.moonshot.cn/v1"))
-    kimi_model: str = field(default_factory=lambda: os.getenv("KIMI_MODEL", "kimi-k2-0905-preview"))
-    kimi_retry: int = 3
-    kimi_timeout: int = 300
+    request_api_key: str = field(
+        default_factory=lambda: os.getenv("OPENROUTER_API_KEY") or os.getenv("KIMI_API_KEY", "")
+    )
+    request_base_url: str = field(
+        default_factory=lambda: os.getenv("OPENROUTER_BASE_URL")
+        or os.getenv("KIMI_API_BASE")
+        or "https://openrouter.ai/api/v1"
+    )
+    request_model: str = field(
+        default_factory=lambda: os.getenv("REQUEST_MODEL")
+        or os.getenv("OPENROUTER_MODEL")
+        or os.getenv("KIMI_MODEL")
+        or "openai/gpt-4o-mini"
+    )
+    request_retry: int = field(
+        default_factory=lambda: int(os.getenv("REQUEST_RETRY", os.getenv("OPENROUTER_RETRY", "3")))
+    )
+    request_timeout: int = field(
+        default_factory=lambda: int(os.getenv("REQUEST_TIMEOUT", os.getenv("OPENROUTER_TIMEOUT", "300")))
+    )
+    request_referer: str = field(default_factory=lambda: os.getenv("OPENROUTER_HTTP_REFERER", ""))
+    request_app_name: str = field(default_factory=lambda: os.getenv("OPENROUTER_APP_NAME", ""))
 
-    gemini_api_key: str = field(default_factory=lambda: os.getenv("GEMINI_API_KEY", ""))
-    gemini_model: str = field(default_factory=lambda: os.getenv("GEMINI_MODEL", "gemini-2.5-flash"))
-    gemini_rpm_limit: int = 1
-    gemini_max_retries: int = 3
-
-    reflection_provider: str = field(default_factory=lambda: os.getenv("REFLECTION_PROVIDER", "gemini"))
-    reflection_model: str = field(default_factory=lambda: os.getenv("REFLECTION_MODEL", "kimi-k2-thinking"))
-    reflection_api_key: str = field(default_factory=lambda: os.getenv("REFLECTION_API_KEY", ""))
-    reflection_base_url: str = field(default_factory=lambda: os.getenv("REFLECTION_BASE_URL", "https://api.moonshot.cn/v1"))
-    reflection_timeout: int = field(default_factory=lambda: int(os.getenv("REFLECTION_TIMEOUT", "300")))
-    reflection_retry: int = field(default_factory=lambda: int(os.getenv("REFLECTION_RETRY", "3")))
+    reflection_model: str = field(
+        default_factory=lambda: os.getenv("REFLECTION_MODEL")
+        or os.getenv("OPENROUTER_REFLECTION_MODEL")
+        or os.getenv("OPENROUTER_MODEL")
+        or "openai/gpt-4o-mini"
+    )
+    reflection_api_key: str = field(
+        default_factory=lambda: os.getenv("REFLECTION_API_KEY") or os.getenv("OPENROUTER_REFLECTION_API_KEY", "")
+    )
+    reflection_base_url: str = field(
+        default_factory=lambda: os.getenv("REFLECTION_BASE_URL")
+        or os.getenv("OPENROUTER_REFLECTION_BASE")
+        or os.getenv("OPENROUTER_BASE_URL")
+        or os.getenv("KIMI_API_BASE")
+        or "https://openrouter.ai/api/v1"
+    )
+    reflection_retry: int = field(
+        default_factory=lambda: int(os.getenv("REFLECTION_RETRY", os.getenv("OPENROUTER_RETRY", "3")))
+    )
+    reflection_timeout: int = field(
+        default_factory=lambda: int(os.getenv("REFLECTION_TIMEOUT", os.getenv("OPENROUTER_TIMEOUT", "300")))
+    )
 
     rule_top_k: int = 10
     fewshot_top_k: int = 3
@@ -54,19 +82,17 @@ class AgentConfig:
     )
     model_config_path: Path = field(default_factory=lambda: Path(os.getenv("MODEL_CONFIG_PATH", "config/models.json")))
     log_dir: Path = field(default_factory=lambda: Path(os.getenv("LOG_DIR", "logs")))
-    kimi_log_path: Path = field(init=False)
+    request_log_path: Path = field(init=False)
     reflection_log_path: Path = field(init=False)
 
     def __post_init__(self) -> None:
-        model_config_path = Path(self.model_config_path)
-        object.__setattr__(self, "model_config_path", model_config_path)
         model_config_path = Path(self.model_config_path)
         object.__setattr__(self, "model_config_path", model_config_path)
         self._apply_model_overrides()
         log_dir = Path(self.log_dir)
         log_dir.mkdir(parents=True, exist_ok=True)
         object.__setattr__(self, "log_dir", log_dir)
-        object.__setattr__(self, "kimi_log_path", log_dir / "kimi_requests.log")
+        object.__setattr__(self, "request_log_path", log_dir / "openrouter_requests.log")
         object.__setattr__(self, "reflection_log_path", log_dir / "reflection_requests.log")
         object.__setattr__(self, "train_records_path", self.data_dir / "train.json")
         object.__setattr__(self, "test_records_path", self.data_dir / "test.json")
@@ -75,22 +101,16 @@ class AgentConfig:
         object.__setattr__(self, "rules_path", self.data_dir / "rules.jsonl")
 
     @property
-    def has_kimi_key(self) -> bool:
-        return bool(self.kimi_api_key.strip())
+    def has_request_key(self) -> bool:
+        return bool(self.request_api_key.strip())
 
     @property
-    def has_gemini_key(self) -> bool:
-        return bool(self.gemini_api_key.strip())
+    def reflection_api_token(self) -> str:
+        return (self.reflection_api_key or self.request_api_key).strip()
 
     @property
-    def has_reflection_key(self) -> bool:
-        provider = (self.reflection_provider or 'gemini').lower()
-        if provider == 'gemini':
-            return self.has_gemini_key
-        if provider in {'kimi', 'openai'}:
-            key = (self.reflection_api_key or self.kimi_api_key).strip()
-            return bool(key)
-        return False
+    def has_reflection_model(self) -> bool:
+        return bool(self.reflection_model.strip())
 
     def _apply_model_overrides(self) -> None:
         config_path = self.model_config_path
@@ -102,11 +122,7 @@ class AgentConfig:
             return
         request_model = str(data.get("request_model") or "").strip()
         if request_model:
-            object.__setattr__(self, "kimi_model", request_model)
+            object.__setattr__(self, "request_model", request_model)
         reflection_model = str(data.get("reflection_model") or "").strip()
         if reflection_model:
             object.__setattr__(self, "reflection_model", reflection_model)
-        reflection_provider = str(data.get("reflection_provider") or "").strip()
-        if reflection_provider:
-            object.__setattr__(self, "reflection_provider", reflection_provider)
-

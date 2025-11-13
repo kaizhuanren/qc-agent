@@ -1,5 +1,4 @@
 {
-  "request_model": "kimi-k2-0905-preview",
-  "reflection_model": "kimi-k2-0905-preview",
-  "reflection_provider": "kimi" 
+  "request_model": "openai/gpt-4o-mini",
+  "reflection_model": "openai/gpt-4o-mini"
 }

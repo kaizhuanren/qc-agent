@@ -110,8 +110,8 @@ def write_json(app, dataset, writer) -> None:
 def main() -> None:
     args = parse_args()
     config = AgentConfig()
-    if not config.has_kimi_key:
-        raise SystemExit("Missing KIMI_API_KEY environment variable.")
+    if not config.has_request_key:
+        raise SystemExit("Missing OPENROUTER_API_KEY environment variable.")
 
     output_path: Path = args.output
     output_path.parent.mkdir(parents=True, exist_ok=True)
